@@ -25,14 +25,14 @@ print(f"총 {len(df)}행 | 미리보기:\n{df.head(2)}\n")
 print("현재 열 목록:", list(df.columns))
 
 
-y = df["조정폭(%)"]                               # 타깃
+y = df[["조정폭(%)", "고점→저점_경과거래일"]]
 X = df.drop(columns=[
     "조정폭(%)", "티커", "종목명",
     "고점→저점_경과거래일", "고점→반등_경과거래일", "저점→반등_경과일"
-    ,"VIX점수(1~10)","RSI점수(1~10)"
+    ,"VIX점수(1~10)","RSI점수(1~10)","시가총액"
 ])                                               # 입력 피처
 num_cols = ["1차파동수익률(%)","1차파동거래대금배율",
-            "재료강도","시황"]
+            "재료강도","시황","상승파동일수","시가총액 대비 메인 거래대금"]
 cat_cols = []
 
 # ────────────────── 2) 전처리 파이프라인 ────────────────
@@ -103,18 +103,6 @@ joblib.dump(best_model, fname)
 print("모델 저장 완료 →", fname)
 
 # ────────────────── 6) 피처 중요도 시각화 ───────────────
-# random_forest = True  # RandomForestRegressor 사용 여부
-# rf_native   = best_model.named_steps["rf"]
-# enc_columns = best_model.named_steps["prep"].get_feature_names_out()
-# importances = rf_native.feature_importances_
-# top_idx     = np.argsort(importances)[-10:][::-1]
-#
-# plt.figure(figsize=(6, 4))
-# plt.barh(range(len(top_idx)), importances[top_idx][::-1])
-# plt.yticks(range(len(top_idx)), enc_columns[top_idx][::-1])
-# plt.xlabel("Importance"); plt.title("RF Feature Importance (Top 10)")
-# plt.tight_layout(); plt.show()
-# ────────── Feature Importance / Coefficient 시각화 ──────────
 import numpy as np, matplotlib.pyplot as plt
 
 # 1) 파이프라인에서 'prep' 을 제외한 실제 모델 단계 이름 찾기
@@ -148,12 +136,18 @@ plt.title(f"{title_base}  (Top {N})")
 plt.tight_layout()
 plt.show()
 
-
-# ────────────────── 7) 새 샘플 예측 ────────────────────
 sample = pd.DataFrame([{
-    "시장":"KOSDAQ", "시황":5,
-    "1차파동수익률(%)":80, "1차파동거래대금배율":2.0,
-    "재료강도":7, "RSI점수(1~10)":4,
-    "VIX점수(1~10)":6, "시황점수(총합)":5
+    "1차파동수익률(%)"      : 15.3,   # 예: 1차 파동 수익률 15.3 %
+    "1차파동거래대금배율"   : 2.1,    # 예: 평균 대비 2.1배
+    "재료강도"              : 5,      # 예: 내부 스코어
+    "시황"                  : 7,      # 예: 1~10 점수
+    "상승파동일수"          : 8,      # 예: 시작→고점 8 거래일
+    "시가총액 대비 메인 거래대금" : 1.8   # 예: 시총 대비 1.8 %
 }])
-print(f"새 샘플 예상 조정폭 ≈ {best_model.predict(sample)[0]:.2f}%")
+
+# 3) 예측 (출력 shape = (1, 2)  →  [조정폭(%), 고점→저점_경과거래일])
+pred = best_model.predict(sample)
+adj_pct, days_peak_to_low = pred[0]
+
+print(f"예측 조정폭   : {adj_pct:6.2f} %")
+print(f"예측 조정기간 : {days_peak_to_low:5.0f} 거래일")

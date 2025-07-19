@@ -5,19 +5,40 @@ from pandas_ta import rsi
 from pykrx import stock
 from datetime import datetime, timedelta
 from tqdm import tqdm
+import logging, sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    stream=sys.stdout,
+    force=True,  # 이미 설정돼 있어도 덮어쓰기 (Py ≥ 3.8)
+)
 
 # ── 파라미터 ───────────────────────────────────────────────
 LOOK_BACK_VOL = 20  # 평균 거래대금 창
 API_WIN_EXTRA = 30  # 버퍼 일수 (rebound 뒤까지 확보)
 
 SRC = "first_wave_input.csv"
+# SRC = "debug.csv"
 DEST = "pullback_dataset.csv"
-
+# DEST = "dubug_dataset.csv"
 
 
 # ────────────────── 전역(캐시) 시계열 초기화 ──────────────────
 VIX_HIST = pd.Series(dtype="float64")  # ^VIX 1y 종가
 _INDEX_CACHE: dict[str, pd.Series] = {}  # 심벌별 종가 시계열
+
+
+def get_market_cap(ticker: str, date: pd.Timestamp) -> Optional[float]:
+    """
+    해당 날짜(영업일)의 시가총액(원)을 반환.
+    • 데이터가 없으면 None 을 돌려줌.
+    """
+    d = date.strftime("%Y%m%d")
+    df = stock.get_market_cap_by_date(d, d, ticker)
+    if df.empty:
+        return None
+    return float(df["시가총액"].iloc[0])
 
 
 def _download_close(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
@@ -33,7 +54,7 @@ def _download_close(symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.S
 def _ensure_range(series: Optional[pd.Series],
                   symbol: str,
                   start: pd.Timestamp,
-                  end:   pd.Timestamp) -> pd.Series:
+                  end: pd.Timestamp) -> pd.Series:
     if series is None or series.empty:
         dl = yf.download(symbol, start=start,
                          end=end + pd.Timedelta(days=1),
@@ -49,12 +70,28 @@ def _ensure_range(series: Optional[pd.Series],
     dl_start = start if need_front else series.index[-1] + pd.Timedelta(days=1)
     dl_end = series.index[0] - pd.Timedelta(days=1) if need_front else end
 
-    dl = yf.download(symbol, start=dl_start,
-                     end=dl_end + pd.Timedelta(days=1),
-                     auto_adjust=False, progress=False)["Close"].squeeze()
+    # ───── 안전 다운로드 & 병합 래퍼 ───────────────────────────────
+    dl = yf.download(
+        symbol,
+        start=dl_start,
+        end=dl_end + pd.Timedelta(days=1),
+        auto_adjust=False,
+        progress=False
+    )["Close"]
 
-    series = (pd.concat([series, dl]).sort_index()
-              .drop_duplicates(keep="last"))
+    # ▸ dl 이 스칼라(float)로 떨어지는 경우가 있다
+    if np.isscalar(dl):
+        dl = pd.Series({dl_start: dl})  # 날짜‑값 한 줄짜리 Series 로 래핑
+
+    # ▸ 기존 series 가 None 이면 빈 Series 로 초기화
+    if series is None:
+        series = pd.Series(dtype="float64")
+
+    series = (
+        pd.concat([series, dl])  # Series + Series → concat
+        .sort_index()
+        .drop_duplicates(keep="last")
+    )
     return series
 
 
@@ -67,8 +104,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     rs = gain / loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
-
-# ── 메인: VIX + 지수 RSI 50:50 시황 점수 ────────────────
+# ─────────────────────────────────────────────────────────────
 def market_scores(d1: pd.Timestamp, d2: pd.Timestamp, market: str
                   ) -> tuple[int, int, int]:
     """
@@ -77,12 +113,12 @@ def market_scores(d1: pd.Timestamp, d2: pd.Timestamp, market: str
     """
     global VIX_HIST, _INDEX_CACHE
 
-    # ─ ① VIX 캐시 보강 -----------------------------------------
+    # ─ ① VIX 캐시 보강 ───────────────────────────────────────
     VIX_HIST = _ensure_range(
         VIX_HIST, "^VIX", d1 - pd.Timedelta(days=365), d2
     )
 
-    # ─ ② 지수 심벌 선택 & 캐시 ---------------------------------
+    # ─ ② 지수 심벌 선택 & 캐시 ───────────────────────────────
     market = market.upper()
     symbol = "^KS11" if market == "KOSPI" else "^KQ11"  # 기본 KOSDAQ
     ser = _INDEX_CACHE.get(symbol)
@@ -91,21 +127,27 @@ def market_scores(d1: pd.Timestamp, d2: pd.Timestamp, market: str
     )
     _INDEX_CACHE[symbol] = ser  # 캐시 업데이트
 
-    # ─ ③ VIX 점수 (역스케일) -----------------------------------
-    vix_window = VIX_HIST.loc[d1: d2 - pd.Timedelta(days=1)]
-    vix_mean = float(vix_window.mean())
-    decile = float((VIX_HIST < vix_mean).mean())  # 0~1
-    vix_score = 11 - int(np.ceil(decile * 10))  # 1~10
+    # ─ ③ VIX 점수(역스케일) ─────────────────────────────────
+    vix_window = VIX_HIST.loc[d1 : d2 - pd.Timedelta(days=1)]
+    vix_mean   = vix_window.mean().item()                 # .item() → 스칼라
+    decile     = (VIX_HIST < vix_mean).mean().item()      # 0‑1 스칼라
+    vix_score  = 11 - int(np.ceil(decile * 10))
+    vix_score  = max(1, min(vix_score, 10))               # 1~10 보장
 
-    # ─ ④ RSI 점수 (0~100 → 1~10) ------------------------------
+    # ─ ④ RSI 점수(0~100 → 1~10) ────────────────────────────
     rsi_series = rsi(ser, 14)
-    rsi_avg = float(rsi_series.loc[d1: d2 - pd.Timedelta(days=1)].mean())
-    rsi_score = int(np.clip(round((rsi_avg - 30) / 7) + 1, 1, 10))
+    rsi_avg    = (
+        rsi_series.loc[d1 : d2 - pd.Timedelta(days=1)]
+        .mean()
+        .item()
+    )
+    rsi_score  = int(np.clip(round((rsi_avg - 30) / 7) + 1, 1, 10))
 
-    # ─ ⑤ 50:50 가중 평균 --------------------------------------
+    # ─ ⑤ 가중 평균 (국내 RSI 80 % : 해외 VIX 20 %) ────────────
     market_score = int(np.clip(round(0.2 * vix_score + 0.8 * rsi_score), 1, 10))
 
     return vix_score, rsi_score, market_score
+# ─────────────────────────────────────────────────────────────
 
 
 def get_ticker_name(ticker: str, market: str) -> str:
@@ -139,11 +181,16 @@ src = pd.read_csv(SRC, dtype={"ticker": str, "market": str},
 
 for r in tqdm(src.itertuples(index=False), total=len(src)):
     d0, d1, d2 = r.date_first_start, r.date_first_peak, r.date_rebound
-    start = d0 - timedelta(days=5)
+    start = d0 - timedelta(days=LOOK_BACK_VOL)
     end = d2 + timedelta(days=API_WIN_EXTRA)
+    logging.info(f"START {r.종목명:<6} {d0.date()}→{d2.date()}")
 
-    df = fetch_ohlcv(r.ticker, r.market, start, end)
-
+    # ───────────── fetch 단계만 보호 ─────────────
+    try:
+        df = fetch_ohlcv(r.ticker, r.market, start, end)
+    except Exception as e:
+        logging.info(f"[{r.ticker}, {r.종목명}] fetch_ohlcv 실패 → 건너뜀")
+        continue  # ★ 다음 종목으로
     # 가격 값
     price_first_start = df.at[d0, "시가"]
     price_first_peak = df.at[d1, "고가"]
@@ -155,7 +202,14 @@ for r in tqdm(src.itertuples(index=False), total=len(src)):
     price_rebound = df.at[d2, "고가"]
     main_vol = df.loc[d0:d1, "거래대금"].max()
     reb_vol_ratio = df.at[d2, "거래대금"] / main_vol
-    print(main_vol,df.at[d2,"거래대금"])
+
+    # 시가총액
+    cap_peak = get_market_cap(r.ticker, d1)  # 1차 고점일 시총
+    cap_peak_ek = None if cap_peak is 0 else cap_peak // 100_000_000
+    main_vol_vs_mcap_pct = main_vol / cap_peak * 100
+
+    # 1차 파동 거래일 수  =  d0에서 d1까지 인덱스 위치 차이
+    days_start_to_peak = df.index.get_loc(d1) - df.index.get_loc(d0)
 
     # 파생 변수
     first_wave_ret = (price_first_peak / price_first_start - 1) * 100
@@ -164,16 +218,19 @@ for r in tqdm(src.itertuples(index=False), total=len(src)):
                          df.loc[d0 - timedelta(days=LOOK_BACK_VOL):d0 - timedelta(days=1),
                          "거래대금"].mean()
 
+    vol_recent = df.loc[d0:d1, "거래대금"].mean()
+    vol_hist = df.loc[d0 - timedelta(days=LOOK_BACK_VOL):d0 - timedelta(days=1),
+               "거래대금"].mean()
+
     retr_pct = (price_first_peak - price_pull_low) / price_first_peak * 100
-    #날짜
+    # 날짜
     days_to_reb = df.index.get_loc(d2) - df.index.get_loc(low_idx)
     days_peak_to_reb = df.index.get_loc(d2) - df.index.get_loc(d1)
     days_peak_to_low = df.index.get_loc(low_idx) - df.index.get_loc(d1)
 
     reb_ratio = (price_rebound / price_pull_low - 1) * 100  # 15.0 (%)
 
-    vix_score, rsi_score, market_score = market_scores(d1, d2, r.market)
-
+    vix_score, rsi_score, market_score = market_scores(d0, d1, r.market)
 
     name = get_ticker_name(r.ticker, r.market)
 
@@ -189,14 +246,17 @@ for r in tqdm(src.itertuples(index=False), total=len(src)):
         round(first_wave_vol_rel, 2),  # 9  1차 파동 거래대금배율
         round(retr_pct, 2),  # 10 조정폭(%)
         days_peak_to_low,  # ★ 고점→저점 거래일
-        days_peak_to_reb,           # ← 11  고점→반등 거래일
+        days_peak_to_reb,  # ← 11  고점→반등 거래일
         days_to_reb,  # 11 저점→반등 경과일
         round(reb_ratio, 2),  # 12 반등(%)
         round(reb_vol_ratio, 2),  # 13 메인대비 반등 거래대금 비율
         market_score,  # 14 시황
         r.재료강도,  # 15 재료강도
         vix_score,  # 16 VIX 점수
-        rsi_score  # 17 RSI 점수
+        rsi_score,  # 17 RSI 점수
+        cap_peak_ek,
+        days_start_to_peak,
+        main_vol_vs_mcap_pct
     ])
 
 # ── 저장 ───────────────────────────────────────────────────
@@ -219,7 +279,10 @@ cols = [
     "시황",  # 14
     "재료강도",  # 15  ← ★ 쉼표 추가
     "VIX점수(1~10)",  # 16
-    "RSI점수(1~10)"  # 17
+    "RSI점수(1~10)",  # 17
+    "시가총액",  # 18
+    "상승파동일수",
+    "시가총액 대비 메인 거래대금"
 ]
 pd.DataFrame(rows, columns=cols).to_csv(DEST, index=False)
 print(f"✓ {DEST} 생성 완료")
