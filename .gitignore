@@ -1,0 +1,18 @@
+# ───────────── Python‑generated files ─────────────
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# ───────────── Virtual environments ─────────────
+.venv/
+
+# ───────────── Data files you don’t want in Git ─────────────
+*.csv
+
+# ───────────── IDE 설정 폴더 ─────────────
+.idea
+
+*.pkl
