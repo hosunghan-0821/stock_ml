@@ -80,5 +80,10 @@ class RisePredictionResponse(BaseModel):
         alias="종목명",
         description="종목명"
     )
+    predicted_adjust_price: int = Field(
+        None,
+        alias="조정가격",
+        description="예측된 조정 가격"
+    )
 
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)

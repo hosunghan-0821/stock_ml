@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends
 
-from app.features import first_wave_features, get_name_from_ticker
+from app.features import first_wave_features, get_name_from_ticker, get_peak_price
 from app.models import get_model  # ← 의존성 주입용 팩토리
 from app.schemas import (  # ← 방금 만든 스키마들
     PredictionRequest, PredictionResponse,
@@ -59,6 +59,7 @@ def predict_rise(
         material_strength=request.material_strength,
     )
     name = get_name_from_ticker(request.ticker, request.market)
+    peak_price = get_peak_price(request.ticker, request.market, request.start_date, request.end_date)
     from tabulate import tabulate
     print(
         tabulate(
@@ -84,9 +85,11 @@ def predict_rise(
         pred_pct = model.predict(X)[0]
 
     pred_pct = float(np.round(pred_pct, 2))
+    adjusted_price = int(round(peak_price * (1 - pred_pct / 100), 2))
 
     return RisePredictionResponse(
         inputs=request,
         predicted_adjust_pct=pred_pct,
-        name=name
+        name=name,
+        predicted_adjust_price=adjusted_price
     )
