@@ -18,10 +18,17 @@ echo "=== $(date) | PIPELINE START ===" | tee -a "$LOG_FILE"
 
 # (2) 전처리
 echo "[1/2] make_preprocessing.py" | tee -a "$LOG_FILE"
-python make_preprocessing.py 2>&1 | tee -a "$LOG_FILE"
+python app/model/make_preprocessing.py 2>&1 | tee -a "$LOG_FILE"
 
 # (3) 모델 학습
 echo "[2/2] make_model.py" | tee -a "$LOG_FILE"
-python make_model.py 2>&1 | tee -a "$LOG_FILE"
+python app/model/make_model.py 2>&1 | tee -a "$LOG_FILE"
+
+echo "=== $(date) | PIPELINE DONE ===" | tee -a "$LOG_FILE"
+
+
+# (4) 서비스(or 추론) 실행
+echo "[3/3] app.main (inference/service)" | tee -a "$LOG_FILE"
+python -m app.main 2>&1 | tee -a "$LOG_FILE"
 
 echo "=== $(date) | PIPELINE DONE ===" | tee -a "$LOG_FILE"

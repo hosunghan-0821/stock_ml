@@ -3,7 +3,7 @@ from pathlib import Path
 
 import joblib
 
-MODEL_PATH = Path(__file__).resolve().parents[1] / "model" / "pullback_rf.pkl"
+MODEL_PATH: Path = Path(__file__).resolve().parent / "model/pullback_blend.pkl"
 
 @lru_cache(maxsize=1)
 def get_model():

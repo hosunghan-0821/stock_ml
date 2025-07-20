@@ -6,6 +6,7 @@ from pykrx import stock
 from datetime import datetime, timedelta
 from tqdm import tqdm
 import logging, sys
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,9 +19,10 @@ logging.basicConfig(
 LOOK_BACK_VOL = 20  # 평균 거래대금 창
 API_WIN_EXTRA = 30  # 버퍼 일수 (rebound 뒤까지 확보)
 
-SRC = "first_wave_input.csv"
+BASE_DIR = Path(__file__).resolve().parent          # /.../app/model
+SRC =  BASE_DIR / "first_wave_input.csv"
 # SRC = "debug.csv"
-DEST = "pullback_dataset.csv"
+DEST = BASE_DIR / "pullback_dataset.csv"
 # DEST = "dubug_dataset.csv"
 
 
@@ -175,114 +177,118 @@ def fetch_ohlcv(ticker, market, start, end):
 
 
 # ── 메인 로직 ──────────────────────────────────────────────
-rows = []
-src = pd.read_csv(SRC, dtype={"ticker": str, "market": str},
-                  parse_dates=["date_first_start", "date_first_peak", "date_rebound"])
+def make_preprocessing():
+    rows = []
+    src = pd.read_csv(SRC, dtype={"ticker": str, "market": str},
+                      parse_dates=["date_first_start", "date_first_peak", "date_rebound"])
 
-for r in tqdm(src.itertuples(index=False), total=len(src)):
-    d0, d1, d2 = r.date_first_start, r.date_first_peak, r.date_rebound
-    start = d0 - timedelta(days=LOOK_BACK_VOL)
-    end = d2 + timedelta(days=API_WIN_EXTRA)
-    logging.info(f"START {r.종목명:<6} {d0.date()}→{d2.date()}")
+    for r in tqdm(src.itertuples(index=False), total=len(src)):
+        d0, d1, d2 = r.date_first_start, r.date_first_peak, r.date_rebound
+        start = d0 - timedelta(days=LOOK_BACK_VOL)
+        end = d2 + timedelta(days=API_WIN_EXTRA)
+        logging.info(f"START {r.종목명:<6} {d0.date()}→{d2.date()}")
 
-    # ───────────── fetch 단계만 보호 ─────────────
-    try:
-        df = fetch_ohlcv(r.ticker, r.market, start, end)
-    except Exception as e:
-        logging.info(f"[{r.ticker}, {r.종목명}] fetch_ohlcv 실패 → 건너뜀")
-        continue  # ★ 다음 종목으로
-    # 가격 값
-    price_first_start = df.at[d0, "시가"]
-    price_first_peak = df.at[d1, "고가"]
+        # ───────────── fetch 단계만 보호 ─────────────
+        try:
+            df = fetch_ohlcv(r.ticker, r.market, start, end)
+        except Exception as e:
+            logging.info(f"[{r.ticker}, {r.종목명}] fetch_ohlcv 실패 → 건너뜀")
+            continue  # ★ 다음 종목으로
+        # 가격 값
+        price_first_start = df.at[d0, "시가"]
+        price_first_peak = df.at[d1, "고가"]
 
-    low_zone = df.loc[d1:d2].iloc[1:]
-    low_idx = low_zone["저가"].idxmin()
-    price_pull_low = low_zone.at[low_idx, "저가"]
+        low_zone = df.loc[d1:d2].iloc[1:]
+        low_idx = low_zone["저가"].idxmin()
+        price_pull_low = low_zone.at[low_idx, "저가"]
 
-    price_rebound = df.at[d2, "고가"]
-    main_vol = df.loc[d0:d1, "거래대금"].max()
-    reb_vol_ratio = df.at[d2, "거래대금"] / main_vol
+        price_rebound = df.at[d2, "고가"]
+        main_vol = df.loc[d0:d1, "거래대금"].max()
+        reb_vol_ratio = df.at[d2, "거래대금"] / main_vol
 
-    # 시가총액
-    cap_peak = get_market_cap(r.ticker, d1)  # 1차 고점일 시총
-    cap_peak_ek = None if cap_peak is 0 else cap_peak // 100_000_000
-    main_vol_vs_mcap_pct = main_vol / cap_peak * 100
+        # 시가총액
+        cap_peak = get_market_cap(r.ticker, d1)  # 1차 고점일 시총
+        cap_peak_ek = None if cap_peak is 0 else cap_peak // 100_000_000
+        main_vol_vs_mcap_pct = main_vol / cap_peak * 100
 
-    # 1차 파동 거래일 수  =  d0에서 d1까지 인덱스 위치 차이
-    days_start_to_peak = df.index.get_loc(d1) - df.index.get_loc(d0)
+        # 1차 파동 거래일 수  =  d0에서 d1까지 인덱스 위치 차이
+        days_start_to_peak = df.index.get_loc(d1) - df.index.get_loc(d0)
 
-    # 파생 변수
-    first_wave_ret = (price_first_peak / price_first_start - 1) * 100
-    first_wave_body = (price_first_peak - price_first_start) / price_first_start
-    first_wave_vol_rel = df.loc[d0:d1, "거래대금"].mean() / \
-                         df.loc[d0 - timedelta(days=LOOK_BACK_VOL):d0 - timedelta(days=1),
-                         "거래대금"].mean()
+        # 파생 변수
+        first_wave_ret = (price_first_peak / price_first_start - 1) * 100
+        first_wave_body = (price_first_peak - price_first_start) / price_first_start
+        first_wave_vol_rel = df.loc[d0:d1, "거래대금"].mean() / \
+                             df.loc[d0 - timedelta(days=LOOK_BACK_VOL):d0 - timedelta(days=1),
+                             "거래대금"].mean()
 
-    vol_recent = df.loc[d0:d1, "거래대금"].mean()
-    vol_hist = df.loc[d0 - timedelta(days=LOOK_BACK_VOL):d0 - timedelta(days=1),
-               "거래대금"].mean()
+        vol_recent = df.loc[d0:d1, "거래대금"].mean()
+        vol_hist = df.loc[d0 - timedelta(days=LOOK_BACK_VOL):d0 - timedelta(days=1),
+                   "거래대금"].mean()
 
-    retr_pct = (price_first_peak - price_pull_low) / price_first_peak * 100
-    # 날짜
-    days_to_reb = df.index.get_loc(d2) - df.index.get_loc(low_idx)
-    days_peak_to_reb = df.index.get_loc(d2) - df.index.get_loc(d1)
-    days_peak_to_low = df.index.get_loc(low_idx) - df.index.get_loc(d1)
+        retr_pct = (price_first_peak - price_pull_low) / price_first_peak * 100
+        # 날짜
+        days_to_reb = df.index.get_loc(d2) - df.index.get_loc(low_idx)
+        days_peak_to_reb = df.index.get_loc(d2) - df.index.get_loc(d1)
+        days_peak_to_low = df.index.get_loc(low_idx) - df.index.get_loc(d1)
 
-    reb_ratio = (price_rebound / price_pull_low - 1) * 100  # 15.0 (%)
+        reb_ratio = (price_rebound / price_pull_low - 1) * 100  # 15.0 (%)
 
-    vix_score, rsi_score, market_score = market_scores(d0, d1, r.market)
+        vix_score, rsi_score, market_score = market_scores(d0, d1, r.market)
 
-    name = get_ticker_name(r.ticker, r.market)
+        name = get_ticker_name(r.ticker, r.market)
 
-    rows.append([
-        r.ticker,  # 1  티커
-        name,  # 2  종목명
-        d0.date(),  # 3  1차 시작일
-        d1.date(),  # 4  1차 고점일
-        low_idx.date(),  # 5  눌림 저점일
-        d2.date(),  # 6  반등일
-        round(price_rebound, 2),  # 7  반등 종가
-        round(first_wave_ret, 2),  # 8  1차 파동 수익률(%)
-        round(first_wave_vol_rel, 2),  # 9  1차 파동 거래대금배율
-        round(retr_pct, 2),  # 10 조정폭(%)
-        days_peak_to_low,  # ★ 고점→저점 거래일
-        days_peak_to_reb,  # ← 11  고점→반등 거래일
-        days_to_reb,  # 11 저점→반등 경과일
-        round(reb_ratio, 2),  # 12 반등(%)
-        round(reb_vol_ratio, 2),  # 13 메인대비 반등 거래대금 비율
-        market_score,  # 14 시황
-        r.재료강도,  # 15 재료강도
-        vix_score,  # 16 VIX 점수
-        rsi_score,  # 17 RSI 점수
-        cap_peak_ek,
-        days_start_to_peak,
-        main_vol_vs_mcap_pct
-    ])
+        rows.append([
+            r.ticker,  # 1  티커
+            name,  # 2  종목명
+            d0.date(),  # 3  1차 시작일
+            d1.date(),  # 4  1차 고점일
+            low_idx.date(),  # 5  눌림 저점일
+            d2.date(),  # 6  반등일
+            round(price_rebound, 2),  # 7  반등 종가
+            round(first_wave_ret, 2),  # 8  1차 파동 수익률(%)
+            round(first_wave_vol_rel, 2),  # 9  1차 파동 거래대금배율
+            round(retr_pct, 2),  # 10 조정폭(%)
+            days_peak_to_low,  # ★ 고점→저점 거래일
+            days_peak_to_reb,  # ← 11  고점→반등 거래일
+            days_to_reb,  # 11 저점→반등 경과일
+            round(reb_ratio, 2),  # 12 반등(%)
+            round(reb_vol_ratio, 2),  # 13 메인대비 반등 거래대금 비율
+            market_score,  # 14 시황
+            r.재료강도,  # 15 재료강도
+            vix_score,  # 16 VIX 점수
+            rsi_score,  # 17 RSI 점수
+            cap_peak_ek,
+            days_start_to_peak,
+            main_vol_vs_mcap_pct
+        ])
 
-# ── 저장 ───────────────────────────────────────────────────
-cols = [
-    "티커",  # 1
-    "종목명",  # 2
-    "1차시작일",  # 3
-    "1차고점일",  # 4
-    "눌림저점일",  # 5
-    "반등일",  # 6
-    "반등종가",  # 7
-    "1차파동수익률(%)",  # 8
-    "1차파동거래대금배율",  # 9
-    "조정폭(%)",  # 10
-    "고점→저점_경과거래일",  # ★ 새 컬럼
-    "고점→반등_경과거래일",  # ★ 새 컬럼
-    "저점→반등_경과일",  # 11
-    "반등(%)",  # 12
-    "메인거래대금 대비 반등거래대금비율",  # 13
-    "시황",  # 14
-    "재료강도",  # 15  ← ★ 쉼표 추가
-    "VIX점수(1~10)",  # 16
-    "RSI점수(1~10)",  # 17
-    "시가총액",  # 18
-    "상승파동일수",
-    "시가총액 대비 메인 거래대금"
-]
-pd.DataFrame(rows, columns=cols).to_csv(DEST, index=False)
-print(f"✓ {DEST} 생성 완료")
+    # ── 저장 ───────────────────────────────────────────────────
+    cols = [
+        "티커",  # 1
+        "종목명",  # 2
+        "1차시작일",  # 3
+        "1차고점일",  # 4
+        "눌림저점일",  # 5
+        "반등일",  # 6
+        "반등종가",  # 7
+        "1차파동수익률(%)",  # 8
+        "1차파동거래대금배율",  # 9
+        "조정폭(%)",  # 10
+        "고점→저점_경과거래일",  # ★ 새 컬럼
+        "고점→반등_경과거래일",  # ★ 새 컬럼
+        "저점→반등_경과일",  # 11
+        "반등(%)",  # 12
+        "메인거래대금 대비 반등거래대금비율",  # 13
+        "시황",  # 14
+        "재료강도",  # 15  ← ★ 쉼표 추가
+        "VIX점수(1~10)",  # 16
+        "RSI점수(1~10)",  # 17
+        "시가총액",  # 18
+        "상승파동일수",
+        "시가총액 대비 메인 거래대금"
+    ]
+    pd.DataFrame(rows, columns=cols).to_csv(DEST, index=False)
+    print(f"✓ {DEST} 생성 완료")
+
+if __name__ == "__main__":
+    make_preprocessing()
